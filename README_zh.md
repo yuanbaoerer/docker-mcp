@@ -1,5 +1,7 @@
 # Docker MCP
 
+[English](./README.md) | [中文](./README_zh.md)
+
 通过 Claude Code 管理 macOS 上的 Docker 的 MCP 服务器。
 
 ## 功能特性

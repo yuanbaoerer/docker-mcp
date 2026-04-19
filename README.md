@@ -1,5 +1,7 @@
 # Docker MCP
 
+[English](./README.md) | [中文](./README_zh.md)
+
 MCP server for managing Docker on macOS via Claude Code.
 
 ## Features
