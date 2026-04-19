@@ -1,3 +1,14 @@
+/**
+ * Docker MCP Server
+ * Provides Docker management tools for Claude Code via the Model Context Protocol.
+ * Supports both Intel (Docker Desktop) and Apple Silicon (Colima) macOS hosts.
+ *
+ * Security constraints enforced:
+ * - docker_rm: blocks removal of running containers
+ * - docker_exec: blocks interactive commands (bash, vim, top, etc.)
+ * - docker_build: enforces .dockerignore existence before build
+ * - docker_logs: enforces tail limit to prevent context explosion
+ */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import Docker from "dockerode";
@@ -325,6 +336,9 @@ async function dockerComposeDown(args: z.infer<typeof DockerComposeDownSchema>) 
 }
 
 // Helper functions
+
+// Docker log streams use 8-byte headers for multiplexed stdout/stderr frames.
+// This strips the headers, returning only the payload bytes.
 function stripDockerHeaders(data: Buffer | string): string {
   if (typeof data === "string") return data;
 
@@ -340,6 +354,7 @@ function stripDockerHeaders(data: Buffer | string): string {
   return result.trim();
 }
 
+// Collects a stream's data chunks into a single string.
 function streamToString(stream: any): Promise<string> {
   return new Promise((resolve, reject) => {
     let output = "";
