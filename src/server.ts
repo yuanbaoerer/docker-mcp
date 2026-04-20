@@ -30,42 +30,54 @@ function getDockerSocket(): string {
 const docker = new Docker({ socketPath: getDockerSocket() });
 
 // Zod schemas - use .shape when passing to server.tool()
-const DockerPsSchema = z.object({});
-const DockerLogsSchema = z.object({
+export const DockerPsSchema = z.object({});
+export const DockerLogsSchema = z.object({
   container: z.string(),
   tail: z.number().default(100),
   since: z.string().optional(),
   timestamps: z.boolean().default(false),
 });
-const DockerStartSchema = z.object({ container: z.string() });
-const DockerStopSchema = z.object({ container: z.string() });
-const DockerRmSchema = z.object({
+export const DockerStartSchema = z.object({ container: z.string() });
+export const DockerStopSchema = z.object({ container: z.string() });
+export const DockerRmSchema = z.object({
   container: z.string(),
   removeVolumes: z.boolean().default(false),
 });
-const DockerExecSchema = z.object({
+export const DockerExecSchema = z.object({
   container: z.string(),
   cmd: z.string(),
 });
-const DockerImagesSchema = z.object({});
-const DockerBuildSchema = z.object({
+export const DockerImagesSchema = z.object({});
+export const DockerBuildSchema = z.object({
   tag: z.string(),
   path: z.string(),
   dockerfile: z.string().optional(),
   buildArgs: z.record(z.string()).optional(),
 });
-const DockerRmiSchema = z.object({
+export const DockerRmiSchema = z.object({
   image: z.string(),
   force: z.boolean().default(false),
 });
-const DockerSystemInfoSchema = z.object({});
-const DockerComposeUpSchema = z.object({
+export const DockerSystemInfoSchema = z.object({});
+export const DockerComposeUpSchema = z.object({
   projectDir: z.string(),
   detached: z.boolean().default(true),
 });
-const DockerComposeDownSchema = z.object({
+export const DockerComposeDownSchema = z.object({
   projectDir: z.string(),
   removeVolumes: z.boolean().default(false),
+});
+export const DockerStatsSchema = z.object({
+  container: z.string().optional(),
+});
+export const DockerPullSchema = z.object({
+  image: z.string(),
+  tag: z.string().default("latest"),
+});
+export const DockerRestartSchema = z.object({ container: z.string() });
+export const DockerInspectSchema = z.object({
+  container: z.string().optional(),
+  image: z.string().optional(),
 });
 
 // Tool implementations
@@ -335,6 +347,96 @@ async function dockerComposeDown(args: z.infer<typeof DockerComposeDownSchema>) 
   }
 }
 
+async function dockerStats(_args: z.infer<typeof DockerStatsSchema>) {
+  const containers = await docker.listContainers({ all: true });
+  const statsPromises = containers.map(async (c) => {
+    const container = docker.getContainer(c.Id);
+    const stats: any = await container.stats({ stream: false });
+    const info = await container.inspect();
+
+    const cpuDelta = (stats.cpu_stats?.cpu_usage?.cpu_usage || 0) - (stats.precpu_stats?.cpu_usage?.cpu_usage || 0);
+    const systemDelta = (stats.cpu_stats?.system_cpu_usage || 0) - (stats.precpu_stats?.system_cpu_usage || 0);
+    const cpuPercent = systemDelta > 0 ? (cpuDelta / systemDelta) * 100 : 0;
+
+    return {
+      id: c.Id.slice(0, 12),
+      name: c.Names[0],
+      image: c.Image,
+      cpu_percent: parseFloat(cpuPercent.toFixed(2)),
+      memory: {
+        usage: stats.memory_stats?.usage || 0,
+        limit: stats.memory_stats?.limit || 0,
+      },
+      network: stats.networks
+        ? Object.values(stats.networks as any).reduce(
+            (acc: { rx: number; tx: number }, n: any) => ({
+              rx: acc.rx + (n.rx_bytes || 0),
+              tx: acc.tx + (n.tx_bytes || 0),
+            }),
+            { rx: 0, tx: 0 }
+          )
+        : { rx: 0, tx: 0 },
+      state: info.State,
+    };
+  });
+
+  const stats = await Promise.all(statsPromises);
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(stats, null, 2) }],
+  };
+}
+
+async function dockerPull(args: z.infer<typeof DockerPullSchema>) {
+  const { image, tag } = args;
+  const fullName = `${image}:${tag}`;
+
+  try {
+    const { stdout, stderr } = await execFile("docker", ["pull", fullName]);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Pulled ${fullName} successfully.\n\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+        },
+      ],
+    };
+  } catch (err: any) {
+    return {
+      content: [{ type: "text" as const, text: `Pull failed: ${err.message}` }],
+      isError: true,
+    };
+  }
+}
+
+async function dockerRestart(args: z.infer<typeof DockerRestartSchema>) {
+  const { container } = args;
+  await docker.getContainer(container).restart();
+  return {
+    content: [{ type: "text" as const, text: `Container ${container} restarted` }],
+  };
+}
+
+async function dockerInspect(args: z.infer<typeof DockerInspectSchema>) {
+  const { container, image } = args;
+
+  if (container) {
+    const info = await docker.getContainer(container).inspect();
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(info, null, 2) }],
+    };
+  } else if (image) {
+    const info = await docker.getImage(image).inspect();
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(info, null, 2) }],
+    };
+  }
+
+  return {
+    content: [{ type: "text" as const, text: "Error: container or image is required" }],
+    isError: true,
+  };
+}
+
 // Helper functions
 
 // Docker log streams use 8-byte headers for multiplexed stdout/stderr frames.
@@ -486,6 +588,42 @@ export class DockerMCP {
       DockerComposeDownSchema.shape,
       {},
       async (args) => dockerComposeDown(args as any)
+    );
+
+    // docker_stats
+    this.server.tool(
+      "docker_stats",
+      "Get real-time CPU, memory, and network stats for all containers",
+      DockerStatsSchema.shape,
+      {},
+      async (args) => dockerStats(args as any)
+    );
+
+    // docker_pull
+    this.server.tool(
+      "docker_pull",
+      "Pull a Docker image from a registry",
+      DockerPullSchema.shape,
+      {},
+      async (args) => dockerPull(args as any)
+    );
+
+    // docker_restart
+    this.server.tool(
+      "docker_restart",
+      "Restart a running container",
+      DockerRestartSchema.shape,
+      {},
+      async (args) => dockerRestart(args as any)
+    );
+
+    // docker_inspect
+    this.server.tool(
+      "docker_inspect",
+      "Get detailed metadata for a container or image",
+      DockerInspectSchema.shape,
+      {},
+      async (args) => dockerInspect(args as any)
     );
   }
 
